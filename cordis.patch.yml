@@ -1,0 +1,7 @@
+# dsh-power-switch bundle patch
+#
+# Host 半边只做一件事：把「重启 / 关闭」翻译成真正的进程生命周期操作，
+# 并通过 /dsh-power-switch/api 暴露给同一个页面里的按钮。
+- insert:
+    - id: dsh-power-switch
+      name: 'dsh-power-switch'
