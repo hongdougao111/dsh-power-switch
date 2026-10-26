@@ -146,28 +146,20 @@ window.__ModuleLoader__.load({
             setBusy(false)
             return
           }
-          if (action === 'shutdown') {
-            setHint('已关闭，进程正在退出 🌙')
-            return
-          }
+          setHint(action === 'shutdown' ? '正在关闭 🌙' : '正在重启 ⚡')
 
-          // 重启：旧进程退出后由 helper 拉起新的。端口可能变，
-          // 所以持续找新实例，一通就刷新。
-          setHint('正在重启，等新实例… ⏳')
-          await new Promise((r) => setTimeout(r, 1_500))
-          for (let i = 0; i < 45; i += 1) {
-            try {
-              const probe = await fetch(`${API}?action=ping`, { credentials: 'same-origin', cache: 'no-store' })
-              if (probe.ok) {
-                window.location.reload()
-                return
-              }
-            } catch {
-              /* 还没回来，继续等 */
-            }
+          // 这个页面跟着旧进程一起消失，不需要轮询也不需要刷新。
+          // 如果十几秒后还活着，说明那一下没生效。
+          for (let i = 0; i < 16; i += 1) {
             await new Promise((r) => setTimeout(r, 1_000))
+            try {
+              await fetch(`${API}?action=ping`, { credentials: 'same-origin', cache: 'no-store' })
+            } catch {
+              // 请求打不通了 —— 进程正在走，这就是预期结果
+              return
+            }
           }
-          setError('等太久了 ⏳')
+          setError('没反应，再点一次？🤔')
           setBusy(false)
         } catch {
           setError('没成功 😵')
@@ -195,7 +187,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dpsw-menu', role: 'menu' },
           h('style', null, CSS),
-          busy ? h('div', { className: 'dpsw-busy' }, '正在重启… ⏳') : null,
+          busy ? h('div', { className: 'dpsw-busy' }, '处理中… ⏳') : null,
           h(
             'button',
             {
