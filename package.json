@@ -1,6 +1,6 @@
 {
   "name": "dsh-power-switch",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "是不是受够了装插件、卸插件、改配置都要重启？右上角一枚电源键，两次点击真的重启 / 关闭 DSH 进程。",
   "type": "module",
   "exports": {
