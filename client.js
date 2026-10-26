@@ -132,6 +132,7 @@ window.__ModuleLoader__.load({
       const act = useCallback(async (action) => {
         setBusy(true)
         setError(null)
+        setHint(null)
         try {
           const res = await fetch(`${API}?action=${action}`, {
             method: 'POST',
@@ -145,13 +146,29 @@ window.__ModuleLoader__.load({
             setBusy(false)
             return
           }
-          if (action === 'shutdown') return
+          if (action === 'shutdown') {
+            setHint('已关闭，进程正在退出 🌙')
+            return
+          }
 
-          // 重启交给 Desktop 自己的恢复对话框：本进程即将以非零码退出，
-          // 主进程会弹出「应用无法启动或已意外停止」，点其中的「重启」即可。
-          // 这里只负责把话说清楚，不再自己找新实例。
-          setError(null)
-          setHint('正在重启：在弹出的窗口里点「重启」↻')
+          // 重启：旧进程退出后由 helper 拉起新的。端口可能变，
+          // 所以持续找新实例，一通就刷新。
+          setHint('正在重启，等新实例… ⏳')
+          await new Promise((r) => setTimeout(r, 1_500))
+          for (let i = 0; i < 45; i += 1) {
+            try {
+              const probe = await fetch(`${API}?action=ping`, { credentials: 'same-origin', cache: 'no-store' })
+              if (probe.ok) {
+                window.location.reload()
+                return
+              }
+            } catch {
+              /* 还没回来，继续等 */
+            }
+            await new Promise((r) => setTimeout(r, 1_000))
+          }
+          setError('等太久了 ⏳')
+          setBusy(false)
         } catch {
           setError('没成功 😵')
           setBusy(false)
