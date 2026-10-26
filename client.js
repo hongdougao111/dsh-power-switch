@@ -97,8 +97,8 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'dpsw-trigger',
           'data-open': open ? 'true' : 'false',
-          title: '电源',
-          'aria-label': '电源',
+          title: '电源开关 ⚡',
+          'aria-label': '电源开关',
           'aria-expanded': open ? 'true' : 'false',
           onClick: () => setPanelOpen(!open),
         },
@@ -138,7 +138,7 @@ window.__ModuleLoader__.load({
           })
           const data = await res.json().catch(() => ({}))
           if (!res.ok || data.ok !== true) {
-            setError('失败')
+            setError('没成功 😵')
             setBusy(false)
             return
           }
@@ -156,10 +156,10 @@ window.__ModuleLoader__.load({
               /* 还没回来，继续等 */
             }
           }
-          setError('超时')
+          setError('等太久了 ⏳')
           setBusy(false)
         } catch {
-          setError('失败')
+          setError('没成功 😵')
           setBusy(false)
         }
       }, [])
@@ -193,7 +193,7 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => confirm('restart'),
             },
-            armed === 'restart' ? '确认重启' : '⚡ 重启',
+            armed === 'restart' ? '确认重启？再点一下' : '⚡ 重启',
           ),
           h(
             'button',
@@ -204,7 +204,7 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => confirm('shutdown'),
             },
-            armed === 'shutdown' ? '确认关闭' : '⏻ 关闭',
+            armed === 'shutdown' ? '确认关闭？再点一下' : '⏻ 关闭',
           ),
           error !== null ? h('div', { className: 'dpsw-err' }, error) : null,
         ),
