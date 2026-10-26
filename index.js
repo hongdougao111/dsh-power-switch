@@ -41,21 +41,24 @@ function runtimeFacts() {
 /**
  * 推导「重新启动一次」的命令行。
  *
- * Electron 宿主里 process.execPath 是应用本体，argv[1] 是它自己的入口脚本，
- * 所以直接原样重放：execPath + argv.slice(1)。普通 node 宿主则拼回
- * node + execArgv + 入口 + 参数。
+ * 关键：Desktop 里我们跑在 **host 子进程**里，不是 Electron 主进程。
+ * process.execPath 虽然是 DeepSeek Harness.exe，但直接执行它 = 又开一个 Electron 主进程，
+ * 会撞单实例锁 / 端口占用，于是主进程弹「应用无法启动或已意外停止」。
+ *
+ * 正确姿势是拿 ELECTRON_RUN_AS_NODE 把同一个 exe 当 node 用，只重放 host 子进程自己：
+ *   exe + execArgv + entry + 原参数
+ * 这样主进程只会看到「我的 host 子进程重启了」，不涉及应用生命周期，不弹崩溃框。
  */
 function launchSpec(facts) {
-  if (facts.electron) {
-    return { file: facts.execPath, args: process.argv.slice(1), via: 'electron-exec' }
-  }
   if (facts.entry !== null && existsSync(facts.entry)) {
     return {
       file: facts.execPath,
       args: [...facts.execArgv, facts.entry, ...process.argv.slice(2)],
-      via: 'node-entry',
+      via: facts.electron ? 'electron-as-node' : 'node-entry',
+      env: facts.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {},
     }
   }
+  // 连入口都推断不出来就别乱猜，宁可拒绝
   return null
 }
 
@@ -66,26 +69,44 @@ function helperRunner(facts) {
   return { file: process.platform === 'win32' ? 'node.exe' : 'node', env: {} }
 }
 
-function helperSource(spec, logs) {
+function helperSource(spec, logs, port, hintFile) {
   return [
     "const { spawn } = require('node:child_process')",
     "const fs = require('node:fs')",
+    "const net = require('node:net')",
     `const file = ${JSON.stringify(spec.file)}`,
     `const args = ${JSON.stringify(spec.args)}`,
+    `const extraEnv = ${JSON.stringify(spec.env ?? {})}`,
     `const logOut = ${JSON.stringify(logs.out)}`,
     `const logErr = ${JSON.stringify(logs.err)}`,
+    `const hintFile = ${JSON.stringify(hintFile)}`,
+    `const port = ${JSON.stringify(port)}`,
     `const waitMs = ${PORT_WAIT_MS}`,
     "const note = (line) => { try { fs.appendFileSync(logErr, `[dsh-power-switch] ${line}\\n`) } catch {} }",
     'const sleep = (ms) => new Promise((r) => setTimeout(r, ms))',
+    '// 端口还在监听 = 旧进程还没走干净，此时拉起新进程必然撞端口',
+    'const busy = () => new Promise((resolveProbe) => {',
+    '  if (!port) { resolveProbe(false); return }',
+    '  const socket = net.connect({ host: "127.0.0.1", port })',
+    '  const done = (value) => { try { socket.destroy() } catch {} resolveProbe(value) }',
+    '  socket.on("connect", () => done(true))',
+    '  socket.on("error", () => done(false))',
+    '  setTimeout(() => done(false), 400)',
+    '})',
     'const main = async () => {',
-    '  await sleep(waitMs)',
+    '  const deadline = Date.now() + waitMs',
+    '  while (Date.now() < deadline && (await busy())) await sleep(200)',
+    '  if (await busy()) { note(`port ${port} still held after ${waitMs}ms; aborting restart to avoid a port clash`) ; return }',
+    '  await sleep(250)',
     '  try {',
     '    const out = fs.openSync(logOut, "a")',
     '    const err = fs.openSync(logErr, "a")',
-    '    const child = spawn(file, args, { detached: true, stdio: ["ignore", out, err], env: process.env, windowsHide: false })',
+    '    const child = spawn(file, args, { detached: true, stdio: ["ignore", out, err], env: { ...process.env, ...extraEnv }, windowsHide: false })',
     '    child.on("error", (error) => note(`replacement failed to start: ${error && error.message ? error.message : error}`))',
     '    child.unref()',
     '    note(`replacement started (pid ${child.pid})`)',
+    // 把「上一次重启」的事实写下来：新实例起来后可以据此告诉用户发生了什么
+    '    try { fs.writeFileSync(hintFile, JSON.stringify({ at: Date.now(), pid: child.pid })) } catch {}',
     '  } catch (error) {',
     '    note(`replacement failed to start: ${error && error.message ? error.message : error}`)',
     '  }',
@@ -174,9 +195,10 @@ export function apply(ctx) {
       out: join(tmpdir(), `dsh-power-switch-${stamp}.out.log`),
       err: join(tmpdir(), `dsh-power-switch-${stamp}.err.log`),
     }
+    const hintFile = join(tmpdir(), 'dsh-power-switch-last-restart.json')
     let helper
     try {
-      helper = spawn(runner.file, ['-e', helperSource(spec, logs)], {
+      helper = spawn(runner.file, ['-e', helperSource(spec, logs, readPort(), hintFile)], {
         detached: true,
         stdio: 'ignore',
         env: { ...process.env, ...runner.env },

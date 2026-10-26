@@ -69,6 +69,7 @@ window.__ModuleLoader__.load({
 .dpsw-btn.shutdown { border-color: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-state-error-primary); }
 .dpsw-btn.armed { background: var(--dsw-alias-state-error-primary); color: #fff; border-color: transparent; }
 .dpsw-err { font-size: 11px; line-height: 1.4; color: var(--dsw-alias-state-error-primary); text-align: center; }
+.dpsw-busy { font-size: 11.5px; line-height: 1.4; color: var(--dsw-alias-label-secondary); text-align: center; }
 `
 
     const Icon = ({ open }) =>
@@ -143,9 +144,11 @@ window.__ModuleLoader__.load({
             return
           }
           if (action === 'shutdown') return
-          // 重启中：本页会被断掉，服务一回来就刷新
-          for (let i = 0; i < 30; i += 1) {
-            await new Promise((r) => setTimeout(r, 900))
+
+          // 重启中：旧实例马上就会消失，新实例端口可能变。
+          // 先等旧页面彻底断掉，再持续找新实例——找到就刷新，不依赖固定端口。
+          await new Promise((r) => setTimeout(r, 1_200))
+          for (let i = 0; i < 60; i += 1) {
             try {
               const probe = await fetch(`${API}?action=ping`, { credentials: 'same-origin', cache: 'no-store' })
               if (probe.ok) {
@@ -155,6 +158,7 @@ window.__ModuleLoader__.load({
             } catch {
               /* 还没回来，继续等 */
             }
+            await new Promise((r) => setTimeout(r, 1_000))
           }
           setError('等太久了 ⏳')
           setBusy(false)
@@ -184,6 +188,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dpsw-menu', role: 'menu' },
           h('style', null, CSS),
+          busy ? h('div', { className: 'dpsw-busy' }, '正在重启，等新实例… ⏳') : null,
           h(
             'button',
             {
