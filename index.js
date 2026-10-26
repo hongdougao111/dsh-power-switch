@@ -4,25 +4,24 @@
  * 只负责一件事：把「重启」「关闭」翻译成真正的进程生命周期操作。
  * 不是 router.refresh()、不是 window.location.reload()——是这个进程真的没了。
  *
- * 两条路径，都验过：
- * - 关闭：让宿主进程退出（有 launcher 的 appExit 钩子就用它，没有就 process.exit）。
- * - 重启：先拉起一个 detached helper，等本进程把端口让出来，再按「自己当初是怎么被启动的」
- *   原样重新拉起一份，最后本进程退出。helper 不在本进程的进程树里，因此不会陪葬。
- *   重建命令行完全靠现场的自省（execPath / argv / execArgv），不猜 profile、不读别人的配置。
+ * 两条路径：
+ * - 关闭：让宿主进程正常退出（有 launcher 的 appExit 钩子就用它，没有就 process.exit(0)）。
+ * - 重启：以非零码退出，把重启交给 DSH Desktop 自己的恢复对话框。
+ *   那个对话框的默认按钮就是「重启」，点下去是 Electron 官方的 app.relaunch()。
+ *   为什么不自建 spawn：Desktop 主进程一旦发现 host 消失就会弹这个框，
+ *   自己拉起的进程会和对话框抢方向盘，用户点 ✕（= 退出）反而把一切关掉。
  */
-import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 
 export const name = 'dsh-power-switch'
 export const inject = ['webServer']
 
 const ROUTE = '/dsh-power-switch/api'
-/** helper 等旧进程让出端口的耐心上限（毫秒）。 */
-const PORT_WAIT_MS = 15_000
 /** 发完 HTTP 响应到真正退出之间的缓冲，让响应先落地。 */
 const EXIT_DELAY_MS = 320
+/** 重启用的非零退出码：主进程据此判定宿主意外停止，弹恢复框让用户走官方 relaunch。 */
+const RESTART_EXIT_CODE = 1
 
 function runtimeFacts() {
   const entry = typeof process.argv[1] === 'string' ? resolve(process.argv[1]) : null
@@ -39,80 +38,21 @@ function runtimeFacts() {
 }
 
 /**
- * 推导「重新启动一次」的命令行。
+ * 能不能重启：需要能认出宿主入口。
  *
- * 关键：Desktop 里我们跑在 **host 子进程**里，不是 Electron 主进程。
- * process.execPath 虽然是 DeepSeek Harness.exe，但直接执行它 = 又开一个 Electron 主进程，
- * 会撞单实例锁 / 端口占用，于是主进程弹「应用无法启动或已意外停止」。
- *
- * 正确姿势是拿 ELECTRON_RUN_AS_NODE 把同一个 exe 当 node 用，只重放 host 子进程自己：
- *   exe + execArgv + entry + 原参数
- * 这样主进程只会看到「我的 host 子进程重启了」，不涉及应用生命周期，不弹崩溃框。
+ * Desktop 下我们不自己 spawn（见 restart 的注释），但仍用这个判断
+ * 回答「这台机器上重启这条路通不通」，避免在无从判断的环境里瞎按。
  */
 function launchSpec(facts) {
   if (facts.entry !== null && existsSync(facts.entry)) {
     return {
       file: facts.execPath,
       args: [...facts.execArgv, facts.entry, ...process.argv.slice(2)],
-      via: facts.electron ? 'electron-as-node' : 'node-entry',
+      via: facts.electron ? 'desktop-recovery-dialog' : 'node-entry',
       env: facts.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {},
     }
   }
-  // 连入口都推断不出来就别乱猜，宁可拒绝
   return null
-}
-
-/** 谁来跑 helper：Electron 本体借 ELECTRON_RUN_AS_NODE 当 node 用。 */
-function helperRunner(facts) {
-  if (facts.electron) return { file: facts.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } }
-  if (facts.execPath && existsSync(facts.execPath)) return { file: facts.execPath, env: {} }
-  return { file: process.platform === 'win32' ? 'node.exe' : 'node', env: {} }
-}
-
-function helperSource(spec, logs, port, hintFile) {
-  return [
-    "const { spawn } = require('node:child_process')",
-    "const fs = require('node:fs')",
-    "const net = require('node:net')",
-    `const file = ${JSON.stringify(spec.file)}`,
-    `const args = ${JSON.stringify(spec.args)}`,
-    `const extraEnv = ${JSON.stringify(spec.env ?? {})}`,
-    `const logOut = ${JSON.stringify(logs.out)}`,
-    `const logErr = ${JSON.stringify(logs.err)}`,
-    `const hintFile = ${JSON.stringify(hintFile)}`,
-    `const port = ${JSON.stringify(port)}`,
-    `const waitMs = ${PORT_WAIT_MS}`,
-    "const note = (line) => { try { fs.appendFileSync(logErr, `[dsh-power-switch] ${line}\\n`) } catch {} }",
-    'const sleep = (ms) => new Promise((r) => setTimeout(r, ms))',
-    '// 端口还在监听 = 旧进程还没走干净，此时拉起新进程必然撞端口',
-    'const busy = () => new Promise((resolveProbe) => {',
-    '  if (!port) { resolveProbe(false); return }',
-    '  const socket = net.connect({ host: "127.0.0.1", port })',
-    '  const done = (value) => { try { socket.destroy() } catch {} resolveProbe(value) }',
-    '  socket.on("connect", () => done(true))',
-    '  socket.on("error", () => done(false))',
-    '  setTimeout(() => done(false), 400)',
-    '})',
-    'const main = async () => {',
-    '  const deadline = Date.now() + waitMs',
-    '  while (Date.now() < deadline && (await busy())) await sleep(200)',
-    '  if (await busy()) { note(`port ${port} still held after ${waitMs}ms; aborting restart to avoid a port clash`) ; return }',
-    '  await sleep(250)',
-    '  try {',
-    '    const out = fs.openSync(logOut, "a")',
-    '    const err = fs.openSync(logErr, "a")',
-    '    const child = spawn(file, args, { detached: true, stdio: ["ignore", out, err], env: { ...process.env, ...extraEnv }, windowsHide: false })',
-    '    child.on("error", (error) => note(`replacement failed to start: ${error && error.message ? error.message : error}`))',
-    '    child.unref()',
-    '    note(`replacement started (pid ${child.pid})`)',
-    // 把「上一次重启」的事实写下来：新实例起来后可以据此告诉用户发生了什么
-    '    try { fs.writeFileSync(hintFile, JSON.stringify({ at: Date.now(), pid: child.pid })) } catch {}',
-    '  } catch (error) {',
-    '    note(`replacement failed to start: ${error && error.message ? error.message : error}`)',
-    '  }',
-    '}',
-    'main()',
-  ].join('\n')
 }
 
 function sameOrigin(req) {
@@ -149,8 +89,17 @@ export function apply(ctx) {
     res.end(JSON.stringify(payload))
   }
 
-  /** 真正退出这个进程。appExit 是 launcher 给的优雅退出钩子，优先用它。 */
-  const shutdown = (reason) => {
+  /**
+   * 退出这个进程。
+   *
+   * `mode: 'restart'` 故意走「非零退出」——Desktop 主进程会把它判定为宿主意外停止，
+   * 弹出恢复对话框；那个对话框的默认按钮（defaultId=1）就是「重启」，
+   * 点下去执行的是 Electron 官方的 app.relaunch() + quit，这才是真正可靠的重启。
+   *
+   * 我们自己 spawn 新进程那条路在 Desktop 下走不通：主进程看到 host 消失就弹框，
+   * 而弹框一旦出现，用户点 ✕ 等于 cancelId=0（退出），新进程起没起来都白搭。
+   */
+  const shutdown = (mode) => {
     busy = true
     setTimeout(() => {
       const exit = (code) => {
@@ -166,8 +115,23 @@ export function apply(ctx) {
       } catch {
         appExit = undefined
       }
+
+      if (mode === 'restart') {
+        // 非零退出码 = 让主进程认定「意外停止」→ 弹恢复框 → 用户点「重启」走官方 relaunch
+        logger?.info?.('dsh-power-switch: restart handed to the desktop recovery dialog')
+        if (typeof appExit === 'function') {
+          try {
+            appExit(RESTART_EXIT_CODE)
+          } catch {
+            /* fall through to a hard exit */
+          }
+        }
+        setTimeout(() => exit(RESTART_EXIT_CODE), 800).unref?.()
+        return
+      }
+
       if (typeof appExit === 'function') {
-        logger?.info?.(`dsh-power-switch: ${reason} via appExit`)
+        logger?.info?.('dsh-power-switch: shutdown via appExit')
         try {
           appExit(0)
         } catch (error) {
@@ -175,44 +139,31 @@ export function apply(ctx) {
           exit(0)
           return
         }
-        // 钩子是异步的；给一点时间，再硬退一次兜底。
         setTimeout(() => exit(0), 1_500).unref?.()
         return
       }
-      logger?.info?.(`dsh-power-switch: ${reason} via process.exit`)
+      logger?.info?.('dsh-power-switch: shutdown via process.exit')
       exit(0)
     }, EXIT_DELAY_MS)
   }
 
+  /**
+   * 重启：不自己拉起新进程，而是把重启交给 DSH Desktop 自己的恢复对话框。
+   *
+   * 原因（实测 + 读主进程源码得出）：Desktop 主进程监视 host 子进程，
+   * 一旦 host 非正常消失就弹「应用无法启动或已意外停止」。
+   * 那个对话框的按钮是 [退出, 重启, 禁用第三方插件]，defaultId=1 即「重启」，
+   * 点下去执行 app.relaunch() + quit —— 官方、可靠、且会正确重建整个应用。
+   *
+   * 之前自己 spawn 的版本会与这个对话框打架：新进程可能起来了，
+   * 但对话框还在，用户点 ✕（= cancelId 0 = 退出）就把一切关掉了。
+   */
   const restart = () => {
-    const spec = launchSpec(facts)
-    if (spec === null) {
+    if (launchSpec(facts) === null) {
       return { ok: false, error: 'cannot infer how this process was started; refusing to guess a restart command', facts }
     }
-    const runner = helperRunner(facts)
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    const logs = {
-      out: join(tmpdir(), `dsh-power-switch-${stamp}.out.log`),
-      err: join(tmpdir(), `dsh-power-switch-${stamp}.err.log`),
-    }
-    const hintFile = join(tmpdir(), 'dsh-power-switch-last-restart.json')
-    let helper
-    try {
-      helper = spawn(runner.file, ['-e', helperSource(spec, logs, readPort(), hintFile)], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, ...runner.env },
-        windowsHide: true,
-      })
-      helper.once?.('error', (error) => {
-        logger?.warn?.(`dsh-power-switch: restart helper failed (${error?.message ?? error})`)
-      })
-      helper.unref()
-    } catch (error) {
-      return { ok: false, error: `could not start the restart helper: ${error?.message ?? error}` }
-    }
     shutdown('restart')
-    return { ok: true, action: 'restart', pid: process.pid, helperPid: helper.pid ?? null, via: spec.via, next: spec.file, logs }
+    return { ok: true, action: 'restart', pid: process.pid, via: 'desktop-recovery-dialog' }
   }
 
   const handle = async (req, res) => {

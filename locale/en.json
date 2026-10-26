@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "⚡ Power Switch",
-    "description": "A power button in the header corner 🔘 Restart really kills the process and spawns a fresh one 🔁 Shutdown really ends it 🌙 No page-refresh cosplaying as a restart 🎭 Stop hunting for the right node.exe in Task Manager 🐋"
+    "description": "Tired of restarting after every plugin install, uninstall, or config tweak? 🐋 One power button in the header corner: two clicks really restart or stop the DSH process. No more guessing which node.exe is the right one 🔘"
   }
 }

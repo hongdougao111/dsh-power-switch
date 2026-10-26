@@ -113,11 +113,13 @@ window.__ModuleLoader__.load({
       const [armed, setArmed] = useState(null)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
+      const [hint, setHint] = useState(null)
 
       useEffect(() => {
         if (!open) {
           setArmed(null)
           setError(null)
+          setHint(null)
           return undefined
         }
         const onKey = (event) => {
@@ -145,23 +147,11 @@ window.__ModuleLoader__.load({
           }
           if (action === 'shutdown') return
 
-          // 重启中：旧实例马上就会消失，新实例端口可能变。
-          // 先等旧页面彻底断掉，再持续找新实例——找到就刷新，不依赖固定端口。
-          await new Promise((r) => setTimeout(r, 1_200))
-          for (let i = 0; i < 60; i += 1) {
-            try {
-              const probe = await fetch(`${API}?action=ping`, { credentials: 'same-origin', cache: 'no-store' })
-              if (probe.ok) {
-                window.location.reload()
-                return
-              }
-            } catch {
-              /* 还没回来，继续等 */
-            }
-            await new Promise((r) => setTimeout(r, 1_000))
-          }
-          setError('等太久了 ⏳')
-          setBusy(false)
+          // 重启交给 Desktop 自己的恢复对话框：本进程即将以非零码退出，
+          // 主进程会弹出「应用无法启动或已意外停止」，点其中的「重启」即可。
+          // 这里只负责把话说清楚，不再自己找新实例。
+          setError(null)
+          setHint('正在重启：在弹出的窗口里点「重启」↻')
         } catch {
           setError('没成功 😵')
           setBusy(false)
@@ -188,7 +178,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'dpsw-menu', role: 'menu' },
           h('style', null, CSS),
-          busy ? h('div', { className: 'dpsw-busy' }, '正在重启，等新实例… ⏳') : null,
+          busy ? h('div', { className: 'dpsw-busy' }, '正在重启… ⏳') : null,
           h(
             'button',
             {
@@ -211,6 +201,7 @@ window.__ModuleLoader__.load({
             },
             armed === 'shutdown' ? '确认关闭？再点一下' : '⏻ 关闭',
           ),
+          hint !== null ? h('div', { className: 'dpsw-busy' }, hint) : null,
           error !== null ? h('div', { className: 'dpsw-err' }, error) : null,
         ),
       )
