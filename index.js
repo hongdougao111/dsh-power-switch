@@ -17,16 +17,34 @@
  * - 重启：同上，然后等端口释放、清理环境变量、重放同一个可执行文件。
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-power-switch'
 export const inject = ['webServer']
 
+/** 从 package.json 读版本，读不到就报 unknown —— 宁可说谎说不知道，也不假装。 */
+const PLUGIN_VERSION = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const raw = readFileSync(join(here, 'package.json'), 'utf8')
+    return String(JSON.parse(raw).version ?? 'unknown')
+  } catch {
+    return 'unknown'
+  }
+})()
+/** 每次改代码手动改这行，用来确认实际加载的到底是哪一份。 */
+const BUILD_TAG = 'reap-stale-2026-10-26'
+
 const ROUTE = '/dsh-power-switch/api'
 /** 发完 HTTP 响应到动手之间的缓冲，让响应先落地。 */
 const EXIT_DELAY_MS = 400
+/** 单份 helper 日志上限，超了就轮转，免得临时目录堆一堆大文件。 */
+const LOG_MAX_BYTES = 1024 * 1024
+/** 新实例启动后必须真的出现窗口，才算活；只看进程会误判。 */
+const WINDOW_WAIT_MS = 30_000
 
 /** 本进程（宿主）的现场事实。 */
 function runtimeFacts() {
@@ -84,7 +102,17 @@ function helperSource(payload) {
     "const net = require('node:net')",
     `const p = ${JSON.stringify(payload)}`,
     'const sleep = (ms) => new Promise((r) => setTimeout(r, ms))',
-    "const note = (line) => { try { fs.appendFileSync(p.logErr, `[dsh-power-switch] ${line}\\n`) } catch {} }",
+    'const LOG_MAX = p.logMaxBytes || 1048576',
+    'const note = (line) => {',
+    '  try {',
+    '    const text = `[dsh-power-switch] ${line}\\n`',
+    '    try {',
+    '      const st = fs.statSync(p.logErr)',
+    '      if (st.size > LOG_MAX) fs.renameSync(p.logErr, `${p.logErr}.1`)',
+    '    } catch {}',
+    '    fs.appendFileSync(p.logErr, text)',
+    '  } catch {}',
+    '}',
     'const alive = (pid) => {',
     '  if (!Number.isInteger(pid) || pid <= 1) return false',
     '  try { process.kill(pid, 0); return true } catch { return false }',
@@ -102,6 +130,41 @@ function helperSource(payload) {
     '  s.on("error", () => finish(false))',
     '  s.setTimeout(600, () => finish(false))',
     '})',
+    '// 有没有真实窗口：进程活着不等于起来了（可能卡在 node 模式、或崩了但进程还在）',
+    '// 注意 "unknown"（PowerShell 还没跟上、查询超时）不代表失败，只代表这次没结论。',
+    'const hasWindow = (pid) => {',
+    '  const ps = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.MainWindowHandle } else { "gone" }`',
+    '  try {',
+    '    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true, timeout: 8000 })',
+    '    const v = String(out).trim()',
+    '    if (v === "gone") return "gone"',
+    '    if (v === "0" || v === "") return "no-window"',
+    '    return "window"',
+    '  } catch { return "unknown" }',
+    '}',
+    '// 收掉上一轮残留的进程（GPU / 渲染器 / 插件后台）。',
+    '// 判据是启动时间：新实例整棵树都晚于新主进程，所以按时间切绝对安全，',
+    '// 不会误杀刚起来的那个。按「孤儿」定义反而危险 —— helper 一退出，新主进程也算孤儿。',
+    'const reapStale = (newPid) => {',
+    '  const ps = `Get-CimInstance Win32_Process -Filter "name=\'${p.exeName}\'" | Select-Object ProcessId,CreationDate | ForEach-Object { "$($_.ProcessId) $($_.CreationDate.ToFileTimeUtc())" }`',
+    '  try {',
+    '    const out = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true, timeout: 15000 })',
+    '    const rows = String(out).split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean).map((line) => {',
+    '      const parts = line.split(/\\s+/)',
+    '      return { pid: Number(parts[0]), born: Number(parts[1]) }',
+    '    }).filter((r) => Number.isInteger(r.pid) && r.pid > 1 && Number.isFinite(r.born))',
+    '    const mine = rows.find((r) => r.pid === newPid)',
+    '    if (mine === undefined) { note("reap: cannot read new instance start time; skipped"); return -1 }',
+    '    // 排除自己：helper 也是用同一个 exe 跑起来的，启动时间还更早，',
+    '    // 不排除的话第一刀就把自己砍了 —— 这就是之前一直没日志的原因。',
+    '    const stale = rows.filter((r) => r.pid !== newPid && r.pid !== process.pid && r.born < mine.born)',
+    '    if (stale.length === 0) { note("reap: no stale processes"); return 0 }',
+    '    let killed = 0',
+    '    for (const r of stale) { if (killPid(r.pid)) killed += 1 }',
+    '    note(`reap: ended ${killed}/${stale.length} stale processes`)',
+    '    return killed',
+    '  } catch (e) { note(`reap skipped: ${e && e.message ? e.message : e}`); return -1 }',
+    '}',
     'const waitFor = async (pred, ms, step) => {',
     '  const end = Date.now() + ms',
     '  while (Date.now() < end) { if (await pred()) return true; await sleep(step) }',
@@ -152,16 +215,38 @@ function helperSource(payload) {
     '      child.on("exit", (code, signal) => { exited = `exited code=${code} signal=${signal}` })',
     '      child.unref()',
     '      note(`relaunched ${p.exe} as pid ${child.pid}`)',
-    '      // 新实例的 GUI 端口每次都是随机的，旧端口不再可用；只能看进程有没有活下来。',
-    '      await sleep(5000)',
-    '      if (exited === null && alive(child.pid)) { launched = child.pid; break }',
-    '      note(`attempt ${attempt} failed: ${exited || "process gone"}`)',
+    '      // 进程活着不算成功：等它真的把窗口画出来，或者确定它已经死了。',
+    '      // "unknown" 只是这次没探到结论（PowerShell 还没跟上），继续等，不当失败。',
+    '      const deadline = Date.now() + (p.windowWaitMs || 30000)',
+    '      let state = "no-window"',
+    '      while (Date.now() < deadline) {',
+    '        if (exited !== null) break',
+    '        if (!alive(child.pid)) { state = "died"; break }',
+    '        state = hasWindow(child.pid)',
+    '        if (state === "window") break',
+    '        await sleep(800)',
+    '      }',
+    '      if (exited === null && state === "window") { launched = child.pid; break }',
+    '      // 超时时如果进程还活着、且始终没探到明确故障，就当它起来了 ——',
+    '      // 宁可少杀一次，也不要因为探测不到而把好好的实例打掉。',
+    '      if (exited === null && alive(child.pid) && state !== "no-window" && state !== "died") {',
+    '        note(`attempt ${attempt}: window probe inconclusive (${state}), process still alive; treating as started`)',
+    '        launched = child.pid',
+    '        break',
+    '      }',
+    '      note(`attempt ${attempt} failed: ${exited || state}`)',
+    '      if (exited === null && alive(child.pid)) { note(`killing windowless pid ${child.pid}`); killPid(child.pid) }',
+    '      await sleep(1200)',
     '    } catch (e) { note(`spawn threw: ${e && e.message ? e.message : e}`) }',
     '  }',
     '  if (launched === null) { note("relaunch failed"); alertUser("重启失败：应用没有起来。请手动启动 DeepSeek Harness。") }',
-    '  else note(`restart complete (pid ${launched})`)',
+    '  else {',
+    '    note(`restart complete (pid ${launched})`)',
+    '    // 立刻收残留：helper 随时可能被回收，别把清理留给后面的 sleep',
+    '    reapStale(launched)',
+    '  }',
     '}',
-    'main()',
+    'main().catch((e) => { note(`helper crashed: ${e && e.message ? e.message : e}`); alertUser("重启失败，请手动启动 DeepSeek Harness。") })',
   ].join('\n')
 }
 
@@ -211,9 +296,12 @@ export function apply(ctx) {
       hostPid: process.pid,
       port: readPort(),
       exe: facts.execPath,
+      exeName: facts.execPath ? basename(facts.execPath) : undefined,
       cwd: facts.execPath ? dirname(facts.execPath) : undefined,
       restart,
       delayMs: EXIT_DELAY_MS,
+      logMaxBytes: LOG_MAX_BYTES,
+      windowWaitMs: WINDOW_WAIT_MS,
       logOut: logs.out,
       logErr: logs.err,
     }
@@ -249,6 +337,8 @@ export function apply(ctx) {
       reply(res, 200, {
         ok: true,
         plugin: name,
+        version: PLUGIN_VERSION,
+        build: BUILD_TAG,
         alive: true,
         busy,
         pid: process.pid,

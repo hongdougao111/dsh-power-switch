@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
 /* shell.overlay 本身点击穿透：面板自己把点击要回来 */
 .dpsw-scrim { position: fixed; inset: 0; z-index: 40; background: transparent; pointer-events: auto; }
 .dpsw-menu {
-  position: fixed; z-index: 41; top: 44px; right: 12px; pointer-events: auto;
+  position: fixed; z-index: 41; right: 12px; pointer-events: auto;
   display: flex; flex-direction: column; gap: 6px; width: 168px; padding: 8px;
   background: var(--dsw-alias-bg-overlay); color: var(--dsw-alias-label-primary);
   border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px;
@@ -55,6 +55,8 @@ window.__ModuleLoader__.load({
   animation: dpsw-drop 120ms ease-out;
 }
 @keyframes dpsw-drop { from { transform: translateY(-4px); opacity: .7 } to { transform: none; opacity: 1 } }
+.dpsw-menu[data-dir="up"] { animation-name: dpsw-rise; }
+@keyframes dpsw-rise { from { transform: translateY(4px); opacity: .7 } to { transform: none; opacity: 1 } }
 .dpsw-btn {
   appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   min-height: 30px; padding: 0 10px; border-radius: 8px; cursor: pointer;
@@ -114,19 +116,46 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
       const [hint, setHint] = useState(null)
+      /* 面板贴着按钮出现；下方放不下就向上翻。不写死坐标，免得换个窗口大小就跑偏 */
+      const [pos, setPos] = useState(null)
 
       useEffect(() => {
         if (!open) {
           setArmed(null)
           setError(null)
           setHint(null)
+          setPos(null)
           return undefined
         }
+        const place = () => {
+          const trigger = document.querySelector('.dpsw-trigger')
+          const menu = document.querySelector('.dpsw-menu')
+          const menuHeight = menu === null ? 140 : menu.offsetHeight
+          const gap = 6
+          if (trigger === null) {
+            setPos({ top: 44, right: 12, dir: 'down' })
+            return
+          }
+          const rect = trigger.getBoundingClientRect()
+          const right = Math.max(8, window.innerWidth - rect.right)
+          const below = window.innerHeight - rect.bottom
+          if (below < menuHeight + gap + 8 && rect.top > menuHeight + gap + 8) {
+            setPos({ top: Math.round(rect.top - menuHeight - gap), right: Math.round(right), dir: 'up' })
+          } else {
+            setPos({ top: Math.round(rect.bottom + gap), right: Math.round(right), dir: 'down' })
+          }
+        }
+        place()
+        const onResize = () => place()
+        window.addEventListener('resize', onResize)
         const onKey = (event) => {
           if (event.key === 'Escape') setPanelOpen(false)
         }
         window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
+        return () => {
+          window.removeEventListener('resize', onResize)
+          window.removeEventListener('keydown', onKey)
+        }
       }, [open])
 
       const act = useCallback(async (action) => {
@@ -185,7 +214,15 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dpsw-scrim', onClick: () => setPanelOpen(false), 'aria-hidden': true }),
         h(
           'div',
-          { className: 'dpsw-menu', role: 'menu' },
+          {
+            className: 'dpsw-menu',
+            role: 'menu',
+            'data-dir': pos === null ? 'down' : pos.dir,
+            style:
+              pos === null
+                ? { top: 44, right: 12 }
+                : { top: `${pos.top}px`, right: `${pos.right}px` },
+          },
           h('style', null, CSS),
           busy ? h('div', { className: 'dpsw-busy' }, '处理中… ⏳') : null,
           h(
