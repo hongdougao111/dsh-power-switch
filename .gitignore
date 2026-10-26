@@ -6,3 +6,5 @@ Thumbs.db
 .stage/
 .sync/
 *.zip
+*.tgz
+publish-npm.cmd

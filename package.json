@@ -29,6 +29,22 @@
     "sidebar"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hongdougao111/dsh-power-switch.git"
+  },
+  "homepage": "https://github.com/hongdougao111/dsh-power-switch#readme",
+  "bugs": {
+    "url": "https://github.com/hongdougao111/dsh-power-switch/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "prepublishOnly": "npm run check"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
