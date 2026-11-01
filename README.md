@@ -180,6 +180,54 @@ dsh plugin add dsh-power-switch
 
 装完重启一次 DSH（对，就用它自己 😏 第一次得手动，之后就不用受这罪了）
 
+### ⚠️ 装完按钮没出现？看这里
+
+DSH **0.2 之后**的加载链路是这样的：
+
+```
+package.json 的依赖
+  → dsh.profile.bundles[] 里有这个包名
+    → 读它的 cordis.patch.yml
+      → insert 那一行 → 插件才真正挂载
+```
+
+**光装依赖是不够的**，还得在 `dsh.profile.bundles` 里登记。
+否则 patch 根本不会被读 —— 文件都在，插件就是不存在 📦≠🔌
+
+正常情况下 `dsh plugin add` 会帮你登记好。但如果：
+
+- 你手动改过 `package.json`
+- 或者 DSH 刚升级过（升级会重写 profile 配置）
+
+那就检查一下 `DSH_HOME/profiles/<profile>/package.json`：
+
+```jsonc
+"dsh": {
+  "profile": {
+    "bundles": [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "dsh-power-switch"        // ← 少了这行，插件就不会加载
+    ]
+  }
+}
+```
+
+补上后重启 DSH 即可。（本插件在 0.1.5 就是被这个坑坑掉的 🩹）
+
+### 🔍 自检：它到底加载了没
+
+```bash
+curl http://127.0.0.1:<port>/dsh-power-switch/api
+```
+
+看两个字段：
+
+- `version` —— 实际加载的版本号
+- `build` —— 我每次改代码手动更新的标记，用来确认跑的是不是最新那份
+
+如果这个地址 404，基本就是上面那个 `bundles` 的问题。
+
 ---
 
 ## 🛡️ 安全边界
