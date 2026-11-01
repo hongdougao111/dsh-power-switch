@@ -5,6 +5,101 @@
 
 ---
 
+## v0.1.5 · 2026-11-01 · 跟着 DSH 搬家 🏠
+
+**DSH 升级了，这个插件差点原地去世。** 现在修好了。
+
+### 先说症状 😵
+
+升级完 DSH 之后，右上角那枚电源键**没了**。
+
+插件在 `package.json` 的依赖里躺着，`node_modules` 里软链接也在，
+但就是不见踪影 —— 因为 **`cordis.patch.yml` 里那条注册被升级过程清掉了**，
+而且 `dsh.profile.bundles` 里也没了它。
+
+新版的加载链路是这样的：
+
+```
+package.json → dsh.profile.bundles[] → 那个包的 cordis.patch.yml → insert 行
+```
+
+**不在 bundles 里 = patch 根本不会被读 = 插件不存在。**
+依赖装了也没用，那只是「文件在那儿」，不是「插件被加载」📦≠🔌
+
+修法就一行：把它加回 `dsh.profile.bundles`。
+
+### 这次升级还搬了家 🚚
+
+| 项目 | 以前 | 现在 |
+|---|---|---|
+| `DSH_HOME` | `C:\Users\...\.dsh` | **`D:\dsh-home`** |
+| profile 目录 | `~/.dsh/profiles/desktop` | **`D:\dsh-home\profiles\desktop`** |
+
+好在我这插件从来不写死路径 🙏 全靠 `process.execPath` / `process.ppid` 现场探测，
+所以换盘符对它没影响 —— 但**新实例能不能继承环境变量**会要命。
+
+查了一下：`DSH_HOME` 是**用户级**环境变量（`[Environment]::GetEnvironmentVariable("DSH_HOME","User")` 有值），
+helper 又是 `{...process.env}` 全量继承，所以新实例照样找得到家 ✅
+
+### 顺手加了环境体检 🩺
+
+每次重启，helper 日志第一行现在会写：
+
+```
+[dsh-power-switch] env: DSH_HOME=D:\dsh-home profile=(unset)
+```
+
+`GET /dsh-power-switch/api` 也会返回 `environment` 字段。
+
+下次 DSH 再搬家，从日志一眼就能看出是不是环境的问题，不用瞎猜 🔍
+
+> 一个诚实的细节：`DSH_PROFILE` 在宿主进程里是**空的**，
+> 但我终端里 `echo $DSH_PROFILE` 是有值的。说明宿主环境和 shell 环境并不一致 ——
+> 所以这里如实记录 `(unset)`，不做兜底猜测。猜错了比不知道更麻烦 🙅
+
+### 兼容性核对 ✅
+
+升级后我逐项验过，没有一处需要改代码：
+
+| 依赖的东西 | 新版状态 |
+|---|---|
+| `webServer.getOrigin()` | 签名未变 |
+| `webServer.register({kind:'exact', path, handler})` | 签名未变 |
+| `conversation.session.header.utilities` slot | 存在，按钮已注册 |
+| `shell.overlay` slot | 存在，面板已注册 |
+| `process.once("disconnect", stop)` | 宿主仍靠它优雅退出 |
+| `fail()` 门控 `!failureReported && !stopping` | 未变，杀主进程仍可行 |
+| `requestSingleInstanceLock()` | 未变，仍要等旧实例退干净 |
+
+### 实测 🎉
+
+```
+env: DSH_HOME=D:\dsh-home profile=(unset)
+ending electron main process 16360
+taskkill /PID 16360 /F ok
+port 64006 released
+relaunched E:\DSH\DeepSeek Harness.exe as pid 8436
+restart complete (pid 8436)
+reap: no stale processes
+```
+
+崩溃日志 **10 → 10**，新版下零新增 ✅
+
+### 一个可能让你困惑的点 🤔
+
+新版主进程命令行带了个 `--updated`：
+
+```
+"E:\DSH\DeepSeek Harness.exe" --updated
+```
+
+我专门翻代码确认了它的含义 —— 只是 `raiseAfterUpdate`，**更新完把窗口置顶**，
+是更新器内部参数，不是启动必需项。
+
+所以 helper 用裸 exe 重启是对的，**不需要**传 `--updated` 🙅
+
+---
+
 ## v0.1.4 · 2026-10-26 · 活没活，得看脸 👀
 
 **「进程还在」不等于「起来了」。** 这版改成看脸。

@@ -36,7 +36,7 @@ const PLUGIN_VERSION = (() => {
   }
 })()
 /** 每次改代码手动改这行，用来确认实际加载的到底是哪一份。 */
-const BUILD_TAG = 'reap-stale-2026-10-26'
+const BUILD_TAG = 'dsh-0.2.x-compat-2026-11-01'
 
 const ROUTE = '/dsh-power-switch/api'
 /** 发完 HTTP 响应到动手之间的缓冲，让响应先落地。 */
@@ -179,6 +179,7 @@ function helperSource(payload) {
     '  return false',
     '}',
     'const main = async () => {',
+    '  note(`env: DSH_HOME=${p.dshHome || "(unset)"} profile=${p.dshProfileDir || "(unset)"}`)',
     '  await sleep(p.delayMs)',
     '  if (p.mainPid) {',
     '    note(`ending electron main process ${p.mainPid}`)',
@@ -268,6 +269,20 @@ export function apply(ctx) {
   const mainPid = mainProcessOf(facts)
   let busy = false
 
+  /**
+   * 环境现场：DSH_HOME 在 0.2 之后从 ~/.dsh 搬到了别处（本机现在是 D:\dsh-home），
+   * profile 路径也跟着变了。新实例靠环境变量继承，所以这里记下来，
+   * 下次再搬家时从日志里一眼能看出是不是这里的问题。
+   *
+   * 注意：宿主进程的环境未必和终端里一致 —— DSH_PROFILE 在宿主里可能就是空的。
+   * 这里如实记录，不做兜底猜测。
+   */
+  const environment = {
+    dshHome: process.env.DSH_HOME ?? null,
+    dshProfile: process.env.DSH_PROFILE ?? null,
+    dshProfileDir: process.env.DSH_PROFILE_DIR ?? null,
+  }
+
   const readPort = () => {
     try {
       const match = /:(\d{2,5})$/.exec(ctx.webServer.getOrigin())
@@ -302,6 +317,8 @@ export function apply(ctx) {
       delayMs: EXIT_DELAY_MS,
       logMaxBytes: LOG_MAX_BYTES,
       windowWaitMs: WINDOW_WAIT_MS,
+      dshHome: environment.dshHome,
+      dshProfileDir: environment.dshProfileDir,
       logOut: logs.out,
       logErr: logs.err,
     }
@@ -344,6 +361,7 @@ export function apply(ctx) {
         pid: process.pid,
         port: readPort(),
         facts,
+        environment,
         restartable: mainPid !== null,
       })
       return
