@@ -36,7 +36,7 @@ const PLUGIN_VERSION = (() => {
   }
 })()
 /** 每次改代码手动改这行，用来确认实际加载的到底是哪一份。 */
-const BUILD_TAG = 'dsh-0.2.x-compat-2026-11-01'
+const BUILD_TAG = 'selfquit-guard-2026-11-12'
 
 const ROUTE = '/dsh-power-switch/api'
 /** 发完 HTTP 响应到动手之间的缓冲，让响应先落地。 */
@@ -207,6 +207,9 @@ function helperSource(payload) {
     '  // 主进程带单例锁：旧实例没彻底走干净时，新实例会自己 quit。多等一会儿。',
     '  await sleep(1200)',
     '  let launched = null',
+    '  // exit code 0 说明是它自己 quit 的（单实例锁或启动鉴权失败），再拉也是白拉，',
+    '  // 而且连着拉会把前一个还没退干净的实例踢掉。遇到这种情况直接放弃。',
+    '  let selfQuit = false',
     '  for (let attempt = 1; attempt <= 5; attempt += 1) {',
     '    if (attempt > 1) { note(`retry ${attempt}/5`); await sleep(3000) }',
     '    let exited = null',
@@ -236,11 +239,21 @@ function helperSource(payload) {
     '        break',
     '      }',
     '      note(`attempt ${attempt} failed: ${exited || state}`)',
+    '      if (exited !== null && exited.includes("code=0") && exited.includes("signal=null")) {',
+    '        note(`pid ${child.pid} quit by itself; not retrying (single-instance lock or startup auth)`);',
+    '        selfQuit = true',
+    '        break',
+    '      }',
     '      if (exited === null && alive(child.pid)) { note(`killing windowless pid ${child.pid}`); killPid(child.pid) }',
     '      await sleep(1200)',
     '    } catch (e) { note(`spawn threw: ${e && e.message ? e.message : e}`) }',
     '  }',
-    '  if (launched === null) { note("relaunch failed"); alertUser("重启失败：应用没有起来。请手动启动 DeepSeek Harness。") }',
+    '  if (launched === null) {',
+    '    note(selfQuit ? "relaunch failed: instance quit on startup" : "relaunch failed")',
+    '    alertUser(selfQuit',
+    '      ? "重启失败：新实例启动后自行退出。这通常是 DSH 0.2.2 的启动鉴权问题（欢迎页登录检查失败），不是插件造成的。请手动打开 DeepSeek Harness。"',
+    '      : "重启失败：应用没有起来。请手动启动 DeepSeek Harness。")',
+    '  }',
     '  else {',
     '    note(`restart complete (pid ${launched})`)',
     '    // 立刻收残留：helper 随时可能被回收，别把清理留给后面的 sleep',
