@@ -5,6 +5,101 @@
 
 ---
 
+## v0.1.6 · 2026-11-12 · 不是我的锅，但得认 🩺
+
+**先说结论：重启在 DSH 0.2.2 上会失败，原因在官方的启动鉴权，不在这个插件。**
+这版让插件别再打滚，一次失败就停手，把真实原因说清楚。
+
+### 撞上了什么 💥
+
+一键重启，日志长这样：
+
+```
+[dsh-power-switch] taskkill /PID 27144 /F ok
+[dsh-power-switch] port 64411 released
+[dsh-power-switch] relaunched ... as pid 12220
+[dsh-power-switch] attempt 1 failed: no-window
+[dsh-power-switch] relaunched ... as pid 25696
+[dsh-power-switch] attempt 2 failed: exited code=0 signal=null
+[dsh-power-switch] relaunched ... as pid 12032
+[dsh-power-switch] attempt 3 failed: exited code=0 signal=null
+...
+[dsh-power-switch] relaunch failed
+```
+
+五次全挂。而且崩溃日志里躺着三份同一个错：
+
+```
+Error: desktop welcome: Web authentication failed
+    at connectDesktopWelcome (app.asar/lib/main.js:16856:31)
+```
+
+### 这个错是怎么来的 🔍
+
+翻了 `main.js` 的源码，链路是这样的：
+
+1. host 起来后报一个带 `?token=` 的 URL，`authenticatedUrl()` 拼的，token 每次进程新生成
+2. 主进程 `authenticateWebHost(ready.url)` 拿这个 URL 换 cookie —— 拿到 303 + `set-cookie` 才算过
+3. 紧接着 `connectDesktopWelcome(ready.url, net.fetch)`，**再打一次同一个 URL**
+
+第 3 步这里 `send(authenticatedUrl, { credentials: "include" })` 没设 `redirect`，默认跟随。
+303 的目标是 `./`，一跟过去 token 就没了，只剩 cookie 起作用。
+
+**而那个 cookie 主进程压根没写进 cookie jar** —— 它存在 `hostCookie` 变量里，
+靠 `webRequest.onBeforeSendHeaders` 手工塞请求头，那个钩子只挂在 `ws://` 上。
+
+那第一次启动凭什么过？**靠上一次启动留在 jar 里的旧 cookie**。
+cookie 有有效期（`maxAgeDays` 天），过期之后再开就是 401。
+
+### 为什么偏偏是「重启」出事 🤔
+
+因为重启把主进程杀了。新主进程是新进程，jar 是空的，
+这一刻既要 token 又要 cookie，而 303 跟随把 token 消耗掉了。
+
+**你现在手动双击图标，撞的是同一个坑。** 不是我插件引入的。
+只是平时你连续用，jar 里总有 cookie 兜着，感觉不出来。
+
+### 这版改了什么 🔧
+
+**一、认出自杀，别再连拉五个。**
+
+`exit code=0 signal=null` 说明是它自己 `quit()` 的 —— 单实例锁或者启动鉴权。
+原来会当成「没窗口」继续重试，结果把前一个还没退干净的踢掉，越试越乱。
+
+现在看到 code=0 立刻停手：
+
+```
+relaunched ... as pid 25696
+pid 25696 quit by itself; not retrying (single-instance lock or startup auth)
+relaunch failed: instance quit on startup
+```
+
+**二、弹窗说实话。**
+
+原来只会说「应用没有起来，请手动启动」。现在分两种：
+
+- 自己退出的 → 「新实例启动后自行退出。这通常是 DSH 0.2.2 的启动鉴权问题，不是插件造成的。请手动打开。」
+- 其它原因 → 还是原来那句
+
+### 还是没解决 📌
+
+**根因在 `connectDesktopWelcome`，插件层够不到。**
+
+能绕的路只有一条：走桌面端菜单里的**「重启应用与 Host」**，
+那条走官方 `app.relaunch()`，退出前 cookie 还在 jar 里，所以不撞。
+
+插件能做到的是：**失败时一次就停，把原因讲明白，不假装成功**。
+剩下那步得等官方修，或者你手动开。
+
+### 本地实测 ✅
+
+升级后插件本身没掉链子，两条 slot 都还在，`webServer` 签名没变，
+`fail()` 门控、`disconnect` 处理、单实例锁全都没动。
+
+（顺手把 BUILD_TAG 换成 `selfquit-guard-2026-11-12`，方便确认加载的是这版。）
+
+---
+
 ## v0.1.5 · 2026-11-01 · 跟着 DSH 搬家 🏠
 
 **DSH 升级了，这个插件差点原地去世。** 现在修好了。
