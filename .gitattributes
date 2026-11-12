@@ -1,0 +1,9 @@
+# 所有文本按 LF 存，跟远端保持一致。
+# 不固定的话 Windows 的 CRLF 会让每次提交都产生假 diff，
+# 明明内容没动，git 却报一整文件都是改动。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary
+*.tgz binary
